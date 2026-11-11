@@ -1,0 +1,316 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>DV Autonomy - Assistente de Visão</title>
+
+<script src="https://cdn.tailwindcss.com"></script>
+<script>
+  tailwind.config = {
+    theme: {
+      extend: {
+        colors: {
+          brand: { black: '#030712', dark: '#0A1128', card: '#0F172A', blue: '#0066FF', electric: '#0099FF', sky: '#38BDF8' }
+        }
+      }
+    }
+  }
+</script>
+<link href="https://fonts.googleapis.com/css2?family=Atkinson+Hyperlegible:wght@400;700&display=swap" rel="stylesheet">
+
+<style>
+  * { box-sizing: border-box; font-family: 'Atkinson Hyperlegible', sans-serif; }
+  body { background-color: #030712; color: #FFFFFF; user-select: none; touch-action: manipulation; }
+  .ui-bloqueada { opacity: 0.5; pointer-events: none; filter: grayscale(80%); }
+</style>
+</head>
+<body class="min-h-screen flex flex-col justify-between p-4 bg-brand-black text-white">
+
+  <!-- Áudio de Boas-Vindas (Gravado) -->
+  <audio id="welcome-audio" src="boas-vindas.mp3" preload="auto"></audio>
+
+  <!-- Cabeçalho -->
+  <header class="w-full max-w-xl mx-auto border-b border-brand-blue/40 pb-3 mb-3 text-center">
+    <h1 class="text-2xl font-black text-brand-electric uppercase tracking-wider">DV AUTONOMY</h1>
+    <p class="text-xs font-bold text-gray-300">Assistente de Visão e Autonomia por Voz</p>
+  </header>
+
+  <main class="w-full max-w-xl mx-auto flex-1 flex flex-col items-center gap-3">
+
+    <!-- Configuração da Chave API (Fica visível apenas se não houver chave salva) -->
+    <div id="key-container" class="w-full bg-brand-card border-2 border-brand-electric rounded-xl p-4 text-center">
+      <label for="api-key-input" class="block text-sm font-bold text-brand-sky mb-2">
+        Insira sua Chave API do Gemini (Salva apenas no seu navegador):
+      </label>
+      <div class="flex gap-2">
+        <input type="password" id="api-key-input" placeholder="Cole sua chave AIzaSy... ou AQ..." 
+               class="flex-1 p-2.5 rounded-lg bg-brand-dark border border-brand-blue text-white text-sm outline-none">
+        <button onclick="salvarChaveAPI()" class="px-4 py-2.5 bg-brand-electric text-black font-bold rounded-lg text-sm hover:bg-brand-sky transition">
+          Salvar
+        </button>
+      </div>
+    </div>
+
+    <!-- Banner Interativo Principal (Tocar para Fotografar) -->
+    <div id="touch-banner" class="w-full bg-brand-dark border-2 border-brand-electric rounded-xl p-5 text-center cursor-pointer active:scale-95 transition shadow-[0_0_20px_rgba(0,153,255,0.25)]">
+      <span class="text-lg font-black text-brand-sky block mb-1">
+        TOQUE EM QUALQUER LUGAR
+      </span>
+      <span class="text-xs text-gray-300 font-bold">
+        ou diga "Tirar foto" a qualquer momento
+      </span>
+    </div>
+
+    <!-- Status Atual do Aplicativo / Fala da IA -->
+    <section class="w-full bg-brand-card border border-brand-blue rounded-xl p-4 text-center min-h-[70px] flex items-center justify-center">
+      <p id="status-text" class="text-base font-bold text-white">Iniciando aplicativo...</p>
+    </section>
+
+    <!-- Visualização da Câmera -->
+    <div class="w-full bg-brand-dark border border-brand-blue rounded-xl p-2 flex flex-col items-center">
+      <video id="webcam" autoplay playsinline muted class="w-full max-h-[220px] object-cover rounded-lg border border-brand-blue/40"></video>
+      <canvas id="canvas-snapshot" class="hidden"></canvas>
+    </div>
+
+    <!-- Botões Secundários -->
+    <div id="action-buttons" class="w-full grid grid-cols-2 gap-2">
+      <button onclick="alternarCamera()" class="py-3 bg-brand-dark border border-brand-blue text-brand-sky font-bold rounded-xl text-xs active:scale-95 transition">
+        Trocar Câmera
+      </button>
+      <button onclick="limparChave()" class="py-3 bg-brand-dark border border-red-500/50 text-red-400 font-bold rounded-xl text-xs active:scale-95 transition">
+        Alterar Chave API
+      </button>
+    </div>
+
+  </main>
+
+  <script>
+    const statusText = document.getElementById('status-text');
+    const video = document.getElementById('webcam');
+    const canvas = document.getElementById('canvas-snapshot');
+    const keyContainer = document.getElementById('key-container');
+    const apiKeyInput = document.getElementById('api-key-input');
+    const welcomeAudio = document.getElementById('welcome-audio');
+    const touchBanner = document.getElementById('touch-banner');
+    const actionButtons = document.getElementById('action-buttons');
+
+    let currentFacingMode = "environment";
+    let currentStream = null;
+    let analisando = false;
+    let interfaceBloqueada = true;
+    let recognition = null;
+
+    // 1. Gerenciamento de Chave API
+    function obterChaveAPI() {
+      return localStorage.getItem('DV_GEMINI_API_KEY') || '';
+    }
+
+    function salvarChaveAPI() {
+      const chave = apiKeyInput.value.trim();
+      if (!chave) {
+        alert("Cole uma chave API válida do Gemini.");
+        return;
+      }
+      localStorage.setItem('DV_GEMINI_API_KEY', chave);
+      verificarEIniciar();
+    }
+
+    function limparChave() {
+      localStorage.removeItem('DV_GEMINI_API_KEY');
+      if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+      location.reload();
+    }
+
+    // 2. Bloqueio e Desbloqueio da Interface
+    function setInterfaceBloqueada(bloquear) {
+      interfaceBloqueada = bloquear;
+      if (bloquear) {
+        touchBanner.classList.add('ui-bloqueada');
+        actionButtons.classList.add('ui-bloqueada');
+      } else {
+        touchBanner.classList.remove('ui-bloqueada');
+        actionButtons.classList.remove('ui-bloqueada');
+      }
+    }
+
+    // 3. Sequência de Abertura (Áudio da Menina -> Instrução por Voz -> Ativação)
+    function iniciarSequenciaBoasVindas() {
+      setInterfaceBloqueada(true);
+      statusText.innerText = "Ouvindo mensagem de boas-vindas...";
+
+      // Tenta reproduzir o arquivo MP3
+      const playPromise = welcomeAudio.play();
+
+      const prosseguirParaInstrucoesVoz = () => {
+        const mensagemInstrucao = "Aponte a câmera para o local desejado. Clique em qualquer lugar da tela para tirar a foto ou diga tirar foto.";
+        falar(mensagemInstrucao, () => {
+          // Após a narração da instrução terminar, libera a tela e liga os sensores
+          setInterfaceBloqueada(false);
+          iniciarCamera();
+          iniciarReconhecimentoVoz();
+        });
+      };
+
+      if (playPromise !== undefined) {
+        playPromise.then(() => {
+          welcomeAudio.onended = prosseguirParaInstrucoesVoz;
+        }).catch(() => {
+          // Caso o navegador bloqueie o autoplay do MP3 sem clique do usuário
+          prosseguirParaInstrucoesVoz();
+        });
+      } else {
+        prosseguirParaInstrucoesVoz();
+      }
+    }
+
+    function verificarEIniciar() {
+      const chave = obterChaveAPI();
+      if (chave) {
+        keyContainer.classList.add('hidden');
+        iniciarSequenciaBoasVindas();
+      } else {
+        keyContainer.classList.remove('hidden');
+        setInterfaceBloqueada(true);
+        statusText.innerText = "Aguardando preenchimento da Chave API do Gemini acima.";
+      }
+    }
+
+    // 4. Síntese de Voz (Fala)
+    function falar(texto, callbackNoFim = null) {
+      statusText.innerText = texto;
+      if ('speechSynthesis' in window) {
+        window.speechSynthesis.cancel();
+        const speech = new SpeechSynthesisUtterance(texto);
+        speech.lang = 'pt-BR';
+        speech.rate = 1.0;
+
+        if (callbackNoFim) {
+          let executado = false;
+          speech.onend = () => {
+            if (!executado) { executado = true; callbackNoFim(); }
+          };
+          // Fallback caso a API de voz do navegador não avise o término
+          setTimeout(() => {
+            if (!executado) { executado = true; callbackNoFim(); }
+          }, 7000);
+        }
+
+        window.speechSynthesis.speak(speech);
+      } else if (callbackNoFim) {
+        callbackNoFim();
+      }
+    }
+
+    // 5. Câmera
+    async function iniciarCamera() {
+      if (currentStream) currentStream.getTracks().forEach(t => t.stop());
+      try {
+        currentStream = await navigator.mediaDevices.getUserMedia({
+          video: { facingMode: { ideal: currentFacingMode } }, audio: false
+        });
+        video.srcObject = currentStream;
+      } catch (e) {
+        statusText.innerText = "Erro ao acessar a câmera. Verifique as permissões do seu navegador.";
+      }
+    }
+
+    async function alternarCamera() {
+      if (interfaceBloqueada) return;
+      currentFacingMode = (currentFacingMode === "environment") ? "user" : "environment";
+      await iniciarCamera();
+      falar("Câmera alterada.");
+    }
+
+    // 6. Reconhecimento de Voz (Comando "Tirar foto")
+    function iniciarReconhecimentoVoz() {
+      const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
+      if (!SpeechRecognition) return;
+
+      try {
+        recognition = new SpeechRecognition();
+        recognition.continuous = true;
+        recognition.lang = 'pt-BR';
+
+        recognition.onresult = (event) => {
+          if (interfaceBloqueada || analisando) return;
+          const lastIndex = event.results.length - 1;
+          const comando = event.results[lastIndex][0].transcript.trim().toLowerCase();
+
+          if (comando.includes('tirar foto') || comando.includes('foto') || comando.includes('analisar')) {
+            tirarFotoEAnalisar();
+          } else if (comando.includes('virar') || comando.includes('trocar')) {
+            alternarCamera();
+          }
+        };
+
+        recognition.onerror = () => setTimeout(() => { try { recognition.start(); } catch(e){} }, 1000);
+        recognition.start();
+      } catch(e) {}
+    }
+
+    // 7. Processamento e Chamada à IA Gemini (Vision API)
+    async function tirarFotoEAnalisar() {
+      if (interfaceBloqueada || analisando) return;
+
+      const apiKey = obterChaveAPI();
+      if (!apiKey) {
+        falar("Chave API não encontrada.");
+        return;
+      }
+
+      if (video.readyState < 2) return;
+      analisando = true;
+      falar("Foto tirada. Analisando imagem...");
+
+      const ctx = canvas.getContext('2d');
+      canvas.width = video.videoWidth || 640;
+      canvas.height = video.videoHeight || 480;
+      ctx.drawImage(video, 0, 0, canvas.width, canvas.height);
+
+      const base64Clean = canvas.toDataURL('image/jpeg', 0.85).replace(/^data:image\/\w+;base64,/, '');
+
+      try {
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${apiKey}`;
+        const response = await fetch(url, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            contents: [{
+              parts: [
+                { text: "Descreva de forma simples, direta e concisa em português o objeto principal nesta imagem para uma pessoa com deficiência visual." },
+                { inline_data: { mime_type: "image/jpeg", data: base64Clean } }
+              ]
+            }]
+          })
+        });
+
+        const data = await response.json();
+
+        if (response.ok && data?.candidates?.[0]?.content?.parts?.[0]?.text) {
+          const respostaIA = data.candidates[0].content.parts[0].text.trim();
+          falar("Objeto identificado: " + respostaIA);
+        } else {
+          const msgErro = data?.error?.message || "Erro no serviço da IA.";
+          falar("Não foi possível analisar. " + msgErro);
+        }
+      } catch (err) {
+        falar("Erro de conexão ao consultar o serviço de inteligência artificial.");
+      } finally {
+        analisando = false;
+      }
+    }
+
+    // Eventos de Toque (Qualquer clique no banner captura a foto)
+    touchBanner.addEventListener('click', tirarFotoEAnalisar);
+    document.body.addEventListener('click', (e) => {
+      // Se clicar no corpo fora dos botões de chave e se o app estiver pronto
+      if (!interfaceBloqueada && !analisando && e.target.tagName !== 'BUTTON' && e.target.tagName !== 'INPUT') {
+        tirarFotoEAnalisar();
+      }
+    });
+
+    window.addEventListener('load', verificarEIniciar);
+  </script>
+</body>
+</html>
